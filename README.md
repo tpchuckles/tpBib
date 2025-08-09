@@ -5,9 +5,7 @@ tpBib is a simple command line python tool for keeping your journal articles org
 I was a long-time user of Mendelay, but it's really gone downhill. People were recommending Zotero, but I operate under a file-centric world-view; without a "watch folder" feature, I'm out. All I personally need is search/dupecheck/bibtex, but if you have more features you want, let me know. 
 
 # How do I use it?
-Download tpBib.py, put it in your pdfs folder, and run it. If the menu options aren't self-explanatory, please let me know. "Admin menu" is where you'll scan the folder (and subfolders), run duplicate-checking, etc. Search and generate bibtex from the main menu. Viewing files is designed to work using your computer's existing pdf viewer (edit the variable "viewerCommand" if yours is different)
-
-If you move files into folders, rescanning should detect that the file has moved. 
+Download tpBib.py, put it in your pdfs folder, and run it. If the menu options aren't self-explanatory, please let me know. "Admin menu" is where you'll scan the folder (and subfolders), run duplicate-checking, etc. Search and generate bibtex from the main menu. Viewing files is designed to work using your computer's existing pdf viewer (edit the variable "viewerCommand" if yours is different). If you move files into folders, rescanning should detect that the file has moved. 
 
 # Bro this code sucks
 ¯\\\_(ツ)\_/¯
