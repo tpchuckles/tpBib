@@ -9,3 +9,5 @@ Download tpBib.py, put it in your pdfs folder, and run it from there. If the men
 
 # Bro this code sucks
 ¯\\\_(ツ)\_/¯
+
+![til](./recording.gif/)
