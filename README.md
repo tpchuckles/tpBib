@@ -8,4 +8,4 @@ I was a long-time user of Mendelay, but it's really gone downhill. People were r
 Download tpBib.py, put it in your pdfs folder, and run it. If the menu options aren't self-explanatory, please let me know. "Admin menu" is where you'll scan the folder (and subfolders), run duplicate-checking, etc. Search and generate bibtex from the main menu. If you move files into folders, rescanning should detect that the file has moved. 
 
 # Bro this code sucks
-¯\_(ツ)_/¯
+¯\\_(ツ)_/¯
