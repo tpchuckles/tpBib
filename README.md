@@ -6,8 +6,8 @@ I was a long-time user of Mendelay, but it's really gone downhill. People were r
 
 # How do I use it?
 Download tpBib.py, put it in your pdfs folder, and run it from there. If the menu options aren't self-explanatory, please let me know. "Admin menu" is where you'll scan the folder (and subfolders), run duplicate-checking, etc. Search and generate bibtex from the main menu. Viewing files is designed to work using your computer's existing pdf viewer (edit the variable "viewerCommand" if yours is different). If you move files into folders, rescanning should detect that the file has moved.
+![til](./recording2.gif/)
 
 # Bro this code sucks
 ¯\\\_(ツ)\_/¯
 
-![til](./recording2.gif/)
