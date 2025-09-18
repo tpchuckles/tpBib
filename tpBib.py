@@ -455,12 +455,18 @@ def unmatchEntries(filelist):
 # look for files in the index with no text. run OCR (optical character recognition), and re-scan them for text
 def findOCRable():
 	global index
+	yesToAll=False
 	for f in index.keys():
 		if len(index[f]["text"])<10:
-			c=viewerCommand+" "+f+" > /dev/null 2>&1"
-			os.system(c)
-			c=input("file "+f+" might benefit from some OCR. do it? (y/n) : ")
-			if "y" in c:
+			if not yesToAll:
+				c=viewerCommand+" "+f+" > /dev/null 2>&1"
+				os.system(c)
+				c=input("file "+f+" might benefit from some OCR. do it? (y/n) : ")
+			else:
+				print("file "+f+" might benefit from some OCR. do it? (y/n) : [y]")
+			if "a" in c:
+				yesToAll=True
+			if "y" in c or yesToAll:
 				os.system("ocrmypdf "+f+" "+f)
 				text=" ".join(getPdfText(f))
 				index[f]["text"]=text
@@ -575,11 +581,18 @@ def textSearch():
 
 	print(formatted)
 	with open("tpBib-searchresults.txt",'w') as fo:
-		for f in index.keys():							# for each file, grab the text, and check it
+		for f in sorted(index.keys()):							# for each file, grab the text, and check it
 			s=index[f]["text"]
 			if eval(formatted):
 				print(f)
 				fo.write(f+"\n")
+
+def getAuthorName(f):
+	f=f.split("/")[-1]
+	for i in range(len(f)):
+		if f[i] in "0123456789.":
+			break
+	return f[:i].lower().strip()
 
 lastOpened=False
 # ask the user for a filename, with or without file suffix (.pdf), and return last-opened if none is entered
@@ -592,6 +605,17 @@ def getFilename():
 		f=f+".pdf"
 	if not os.path.exists(f):
 		print("error, file does not exist")
+		candidates=[]
+		authorName=getAuthorName(f)#.lower().strip()
+		#print("authorName",authorName)
+		for fc in sorted(index.keys()):
+			fca=getAuthorName(fc)#.lower().strip()
+			#print("compare against: ",authorName,fca,authorName==fca)
+			if authorName in fca or fca in authorName:
+				candidates.append(fc)
+		if len(candidates)>0:
+			print("did you mean: "+",".join(candidates))
+
 		return False
 	lastOpened=f
 	return f
@@ -604,7 +628,7 @@ def openFile():
 	c=viewerCommand+" "+f+" > /dev/null 2>&1"
 	os.system(c)
 
-# ask for the filename, return bibtex
+# ask for the filename, return getAuthorName(fc).lower()
 def getBibtex():
 	import pdf2bib
 	pdf2bib.config.set('verbose',False)
@@ -613,6 +637,39 @@ def getBibtex():
 		return
 	bib=pdf2bib.pdf2bib(f)['bibtex']
 	print(bib)
+
+def translatePaper():
+	f=getFilename()
+	text=index[f]["text"]
+
+	import asyncio,time
+	from googletrans import Translator
+	async def translate_text():
+		async with Translator() as translator:
+			chunks=[[]]
+			for word in text.split():
+				if len(chunks[-1])>=100:
+					chunks.append([])
+				chunks[-1].append(word)
+				#if len(chunks)>10:
+				#	break
+			chunks=[ " ".join(chunk) for chunk in chunks ]
+			#print(chunks)
+			translations = await translator.translate(chunks, dest='en')
+			#translations=sum(translation)
+			#print(translations)
+			#print(" ".join(results))
+			with open(f.replace(".pdf","_translated.txt"),'w') as fo:
+				for n,translation in enumerate(translations):
+					#print(n,chunks[n],translation.origin,translation.text)
+					fo.write(translation.text)
+	asyncio.run(translate_text())
+	#translate_text()
+
+	#print(result)
+	#with open(f.replace(".pdf","_translated.txt"),'w') as fo:
+	#	fo.write(str(result))
+
 
 # "smart" command-line menu function: pass it a list of doubles: text and function to be called, and we'll display the text, and execute the function if that index is chosen
 def menu(options,save=True):
@@ -647,6 +704,7 @@ def adminMenu():
 menu([["search",textSearch],
 	["open file",openFile],
 	["get bibtex",getBibtex],
+	["translate",translatePaper],
 	["admin menu",adminMenu]],save=False)
 
 
