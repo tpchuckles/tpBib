@@ -146,11 +146,32 @@ def indexing():
 		text=" ".join(" ".join(getPdfText(f)).split())			# pull text from pdf (so we can search and deduplicate later)
 		entry={ "text":text, "timestamp":timestamp, "checkedTextAgainst":[], "checkedPixelsAgainst":[], "matches":[] }
 		index[f]=entry
+
+		cleanupIndex("matches",files)
+		cleanupIndex("checkedTextAgainst",files)
+		cleanupIndex("checkedPixelsAgainst",files)
+
+
+def cleanupIndex(pointerKey,files):
 	# ensure all index entries exist as files! 
 	for f in list(index.keys()):							# look through files in index
 		if f not in files:						# clear index entries for files which are no longer present
 			del index[f]
 			print("removing missing file",f,"from index")
+	# also perform a sanity check on index entries
+	for f in list(index.keys()):
+		if f in index[f][pointerKey]:
+			print("removing self-"+pointerKey+":",f,"-->",f)
+			i=index[f][pointerKey].index(f)
+			del index[f][pointerKey][i]
+		for f2 in list(index[f][pointerKey]):
+			if f2 not in index.keys():
+				print("removing dangling "+pointerKey+":",f,"-->",f2)
+				i=index[f][pointerKey].index(f2)
+				del index[f][pointerKey][i]
+		if len(set(index[f][pointerKey])) != len(index[f][pointerKey]):
+			print("removing duplicate "+pointerKey+" entries:",index[f][pointerKey])
+			index[f][pointerKey]=list(set(index[f][pointerKey]))
 
 
 # for string-based dupe-checking, prevent certain frequently-occurring long strings from matching
@@ -335,13 +356,13 @@ def manageDuplicates(ignoreAlreadySorted=True):
 			#	im.save("duplicates/preview/"+str(n)+".png")
 			c=input("shall we delete "+str(matches[1:])+"? (y/[integer]/i/u/e/w/q/help) : ")
 			if "h" in c:
-				print("y - yes: delete the second file, keep the first\n"+\
-					"any integer: we will keep the file you specify and delete the rest\n"+\
-					"i - ignore: ignore for now (you will be asked about these again)\n"+\
-					"u - unmatch: unmatch all (you will not be asked about these again)\n"+\
-					"e - edit: you will provide indices to regroup linkages\n"+\
-					"w - wipe: wipe index for these entries so we can recheck for dupes\n"+\
-					"q - quit")
+				print("y   - yes: delete the second file, keep the first\n"+\
+					"[n] - we will keep the file you specify and delete the rest\n"+\
+					"i   - ignore: ignore for now (you will be asked about these again)\n"+\
+					"u   - unmatch: unmatch all (you will not be asked about these again)\n"+\
+					"e   - edit: you will provide indices to regroup linkages\n"+\
+					"w   - wipe: wipe index for these entries so we can recheck for dupes\n"+\
+					"q   - quit")
 				c=input("shall we delete "+str(matches[1:])+"? (y/[integer]/i/u/e/w/q/help) : ")
 			if len(c)==0:
 				return
@@ -521,7 +542,7 @@ def reletter():
 				shutil.move(f,c+".pdf")
 			elif "y" in c:
 				rekey(f,direc+author+year+letter+".pdf")
-				shutil.move(f,direc+author+year+letter+".pdf")
+				shutil.move(f,direc+author+year+letter+".pdf") # BUG: if only renaming is capitalization, and filesystem is case-insensitive, you will rekey but not actually rename. it will be reindex, all linkages will be removed (appearing as danglers), and it will be rechecked as dupe against everything.
 			elif "n" in c:
 				index[f]["dontrename"]=True
 			elif "q" in c:
@@ -613,6 +634,9 @@ def getFilename():
 			#print("compare against: ",authorName,fca,authorName==fca)
 			if authorName in fca or fca in authorName:
 				candidates.append(fc)
+		if len(candidates)==1:
+			print("assuming you meant: "+candidates[0])
+			return candidates[0]
 		if len(candidates)>0:
 			print("did you mean: "+",".join(candidates))
 
@@ -631,12 +655,49 @@ def openFile():
 # ask for the filename, return getAuthorName(fc).lower()
 def getBibtex():
 	import pdf2bib
-	pdf2bib.config.set('verbose',False)
+	pdf2bib.config.set('verbose',True)
 	f=getFilename()
 	if not f:
 		return
-	bib=pdf2bib.pdf2bib(f)['bibtex']
+	if "bibtex" in index[f].keys():
+		bib=index[f]["bibtex"]
+	else:
+		bib=pdf2bib.pdf2bib(f)['bibtex']
+		lines=bib.split("\n")
+		f=f[0].upper()+f[1:].replace(".pdf","")
+		lines[0]=lines[0].split("{")[0]+"{"+f+","
+		bib="\n".join(lines)
 	print(bib)
+
+def enterBibtex():
+	global index
+	f=getFilename()
+	if not f:
+		return
+	bib=[] ; print("enter bibxtex: \n")
+	while True:
+		#print("")
+		b=input("")
+		if b=="c":
+			print("clearing bibtex")
+			if "bibtex" in index[f].keys():
+				del index[f]["bibtex"]
+			break
+		if b=="q":
+			return
+		if b and len(b)>2:
+			bib.append(b)
+		else:
+			break
+	#bib=input("enter bibtex: ")
+	#if b=="c":
+	#	print("clearing bibtex")
+	#	if "bibtex" in index[f].keys():
+	#		del index[f]["bibtex"]
+	#	return
+	#if b=="q":
+	#	return
+	index[f]["bibtex"]="\n".join(bib)
 
 def translatePaper():
 	f=getFilename()
@@ -699,6 +760,7 @@ def adminMenu():
 	["update timestamps in index",fixTimestamps],
 	["manual unlink for rescan",unlinkEntries],
 	["manual rename",rename],
+	["manual enter bibtex",enterBibtex],
 	["inspect index entry",inspectEntry]])
 
 menu([["search",textSearch],
