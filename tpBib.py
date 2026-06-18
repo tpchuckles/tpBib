@@ -132,7 +132,8 @@ def indexing():
 		# was the file indexed previously, but moved?
 		fname=f.split("/")[-1] ; wasMoved=False
 		for k in list(index.keys()):
-			if fname in k and timestamp==index[k]["timestamp"]:
+			if fname in k and timestamp==index[k]["timestamp"] and\
+					not os.path.exists(k): # do not warn about movement if BOTH files exist
 				print("looks like",k,"was moved to",f)
 				wasMoved=True
 				rekey(k,f)
@@ -731,6 +732,39 @@ def translatePaper():
 	#with open(f.replace(".pdf","_translated.txt"),'w') as fo:
 	#	fo.write(str(result))
 
+def bib2xml(bibtex):
+	import xml.etree.ElementTree as ET
+	from xml.dom import minidom
+	import bibtexparser
+	bibtex = bibtexparser.loads(bibtex)
+
+	root = ET.Element("bibliography")
+
+	for entry in bibtex.entries:
+		# Create an element for each entry type (e.g., <article>, <book>)
+		entry_type = entry.get('ENTRYTYPE', 'entry')
+		entry_element = ET.SubElement(root, entry_type)
+
+		# Set the unique citation key as an attribute
+		if 'ID' in entry:
+			entry_element.set('id', entry['ID'])
+
+		# Populate fields (e.g., <author>, <title>, <year>)
+		for field_name, field_value in entry.items():
+			# Skip internal metadata keys used by bibtexparser
+			if field_name in ['ENTRYTYPE', 'ID']:
+				continue
+
+			field_element = ET.SubElement(entry_element, field_name)
+			field_element.text = field_value
+
+	xml_string = ET.tostring(root, encoding='utf-8')
+	parsed_string = minidom.parseString(xml_string)
+	pretty_xml = parsed_string.toprettyxml(indent="    ")
+
+	#with open(xml_file_path, 'w', encoding='utf-8') as xml_file:
+	#	xml_file.write(pretty_xml)
+	print(pretty_xml)
 
 # "smart" command-line menu function: pass it a list of doubles: text and function to be called, and we'll display the text, and execute the function if that index is chosen
 def menu(options,save=True):
