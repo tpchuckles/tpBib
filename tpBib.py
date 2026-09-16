@@ -72,9 +72,14 @@ def saveJson():
 		print("saving json")
 		with open("tpBib.json", 'w') as f:					# save off new index dict
 			json.dump(index, f, indent=4)
-	except:
+		return True
+	except KeyboardInterrupt:								# dump failing for some other reason shoudn't retry indefinitely?
 		print("WARNING: PLEASE DO NOT INTERRUPT JSON SAVE, OR ELSE YOUR DATABASE WILL BE CORRUPTED")
-		saveJson()
+		return saveJson()
+	except Exception as e:
+		import traceback
+		print(traceback.print_exc())
+		return False
 
 # given a dict, returns a deep-copy (not just a reference)
 def copyof(dic):
@@ -118,9 +123,18 @@ def fixTimestamps():
 		index[f]["timestamp"]=timestamp
 	print("all timestamps updated")
 
+def indexed(f):
+	global index
+	timestamp=os.path.getmtime(f)
+	text=" ".join(" ".join(getPdfText(f)).split())			# pull text from pdf (so we can search and deduplicate later)
+	h = hashed(f)
+	entry={ "text":text, "timestamp":timestamp, "hash":h, "checkedTextAgainst":[], "checkedPixelsAgainst":[], "matches":[] }
+	index[f]=entry
+
 # scan all folders/subfolders, check each file. if it's in the index, check the timestamp, ignore or update. if it's not, add it. check all index entries to see if there are extras. 
 def indexing():
 	files=glob.glob("**/*.pdf",recursive=True)				# collect up all files
+	files = [ f for f in files if ".dupes/" not in f ]
 	global index
 	print("updating index")
 	# ensure all files are in index
@@ -129,10 +143,12 @@ def indexing():
 		timestamp=os.path.getmtime(f)					# get file modification time https://stackoverflow.com/questions/237079/how-do-i-get-file-creation-and-modification-date-times
 		if f in index.keys() and index[f]["timestamp"]==timestamp:	# if file is unchanged, ignore
 			continue
-		# was the file indexed previously, but moved?
-		fname=f.split("/")[-1] ; wasMoved=False
+		# was the file indexed previously, but moved? previously we used a file base name, but we also want to capture renamed files, so check hash instead
+		wasMoved=False
+		h = hashed(f)
 		for k in list(index.keys()):
-			if fname in k and timestamp==index[k]["timestamp"]:
+			if h == index[k]["hash"] and timestamp==index[k]["timestamp"] and\
+					not os.path.exists(k): # do not warn about movement if BOTH files exist
 				print("looks like",k,"was moved to",f)
 				wasMoved=True
 				rekey(k,f)
@@ -141,16 +157,115 @@ def indexing():
 				break
 		if wasMoved:
 			continue
-		# or is it a new file! 
+		# or is it a new file! or timestamp changed
 		print("adding",f,"to index:\t\t",n,"/",len(files))
-		text=" ".join(" ".join(getPdfText(f)).split())			# pull text from pdf (so we can search and deduplicate later)
-		entry={ "text":text, "timestamp":timestamp, "checkedTextAgainst":[], "checkedPixelsAgainst":[], "matches":[] }
-		index[f]=entry
+		indexed(f)
+		unlinkEntries([f]) # edge case: timestamp changed. cleanupIndex will not delete references from other files to this.
 
-		cleanupIndex("matches",files)
-		cleanupIndex("checkedTextAgainst",files)
-		cleanupIndex("checkedPixelsAgainst",files)
+	cleanupIndex("matches",files) # oops, cleanup was not supposed to be inside the file loop (led to order-based purging)
+	cleanupIndex("checkedTextAgainst",files)
+	cleanupIndex("checkedPixelsAgainst",files)
 
+def gatherFrom():
+	global index
+	where = input("enter path to directory to scrape: ")
+	if len(where)==0:
+		return
+	files = glob.glob(where+"/*.pdf") ; failed = [] ; ignored = [] ; success = []
+	already = [ index[f]["copied_from"] for f in index.keys() if "copied_from" in index[f].keys() ]
+	print("hashing existing")
+	hashes = { }
+	for f in tqdm(list(sorted(index.keys()))):
+		h = index[f]["hash"]
+		hashes[ h ] = f
+	# loop importable files
+	for f in files:
+		# To start, gnore any that have already been completed
+		if f in already:
+			ignored.append(f)
+		h = hashed(f)
+		if h in hashes.keys(): # TODO should add h to hashes in case there are dupes in the imported folder
+			f2 = hashes[h]
+			index[f2]["copied_from"]=f
+			ignored.append(f)
+			print("IDENTICAL FILE ALREADY FOUND",f)
+			continue
+		# First, try reading PDF metadata to scrape author/year
+		try:
+			meta=PdfReader(f).metadata
+			author = meta.author
+			if author is not None:
+				print("PdfReader found author(s)",author)
+				author = str(author).lower().split(",")[0].split()[-1] # first last, first last...
+			year=str(meta.creation_date.year)
+			print("PdfReader found year",year)
+		except KeyboardInterrupt:
+			break
+		except Exception as e:
+			print("meta errror",e) ; time.sleep(5)
+			author = None ; year = None
+
+		# If that fails, try pdf2bib. let's just hijack our existing getBibtex function
+		try:
+			if author is None or year is None:
+				bib=getBibtex(f,ask=False)
+				# it might fail outright
+				if bib is None:
+					print("bib error") ; time.sleep(5)
+					failed.append(f)
+					continue
+				# or we can try to parse author/year from it
+				for l in bib.split("\n"):
+					# comparison against whitespace purged https://stackoverflow.com/questions/8270092/remove-all-whitespace-in-a-string
+					if "year=" in "".join(l.split()):
+						year = l.replace("year","").replace("=","").replace("{","").replace("}","").replace(",","").strip()
+						print("bibtex found year",year)
+					if "author=" in "".join(l.split()):
+						print("author line found:",l)
+						authors = l.replace("author","").replace("=","").replace("{","").replace("}","").strip()
+						first = authors.split("and")[0].strip()
+						# handle both "Last, First" and "First Last" formatting
+						author = first.split(",")[0].split()[-1].lower()
+						print("bibtex found author",author)
+		except KeyboardInterrupt:
+			break
+		except Exception as e:
+			print("bib fail",e) ; time.sleep(5)
+			author = None ; year = None
+
+		if author is None or year is None:
+			failed.append(f)
+			continue
+		if not author or not year:
+			failed.append(f)
+			continue
+
+		try:
+			# if both found, loop through firstauthorlastnameYEARa.pdf
+			suffixes=" abcdefghijklmnopqrstuvwxyz"
+			suffix = "" ; i=0
+			while os.path.exists(author+year+suffix+".pdf"):
+				i+=1
+				suffix = suffixes[i]
+			f2 = author+year+suffix+".pdf"
+			shutil.copy(f,f2)
+
+			indexed(f2)
+			index[f2]["copied_from"]=f
+			success.append(f)
+		except KeyboardInterrupt:
+			break
+		except Exception as e:
+			print("shutil error",e) ; time.sleep(5)
+			failed.append(f)
+			continue
+	print("copied in "+str(len(success))+"/"+str(len(files))+" files, "+str(len(failed))+" failed, "+str(len(ignored))+" ignored.")
+	for f in failed:
+		print(f)
+	print("recommended to rerun indexing just to be safe")
+	#if len(failed)>0:
+	#	for
+	#	print("failed on: "+",".join(skipped))
 
 def cleanupIndex(pointerKey,files):
 	# ensure all index entries exist as files! 
@@ -173,9 +288,43 @@ def cleanupIndex(pointerKey,files):
 			print("removing duplicate "+pointerKey+" entries:",index[f][pointerKey])
 			index[f][pointerKey]=list(set(index[f][pointerKey]))
 
+def hashed(f):
+	import hashlib
+	hasher = hashlib.sha256()
+	return hashlib.file_digest(open(f, "rb"), "sha256").hexdigest()
 
-# for string-based dupe-checking, prevent certain frequently-occurring long strings from matching
-ignoredCharsets=[";"]+[ " "+l+". " for l in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" ]+["Creative Commons Attribution","Reprints and permission information","Nature Research Reporting Summary","Creative Commons license","CreativeCommons license","Reprints and permission information is available at","distribution and reproduction in any medium or format","To view copy of this license"]
+def addMatch(f1,f2):
+	if f2 not in index[f1]["matches"]:
+		index[f1]["matches"].append(f2)
+	if f1 not in index[f2]["matches"]:
+		index[f2]["matches"].append(f1)
+
+def checkForBinaryIdentical():
+	global index
+	os.makedirs(".dupes",exist_ok=True)
+	print("hashing")
+	hashes = { }
+	fnames = list(sorted(index.keys()))
+	for f in tqdm(fnames):
+		h = index[f]["hash"]
+		hashes[f] = h
+	print("comparing hashes")
+	for i,f1 in enumerate(tqdm(fnames)):
+		for j,f2 in enumerate(fnames):
+			if i>=j:
+				continue
+			if not os.path.exists(f2):
+				continue
+			if hashes[f1]==hashes[f2]:
+				#shutil.move(f2,".dupes/"+f2.replace("/","_"))
+				#del index[f2]
+				print("likely match:",f1,f2)
+				addMatch(f1,f2)
+
+# for string-based dupe-checking, prevent certain frequently-occurring long strings from matching: exclude common license blurbs, data availability statements, long affiliation addresses, repeated references, pre-print or author proof watermarks. These are allowed to be pretty agressive: if we have two matching papers but a portion of a matching paragraph is excluded, hopefully the rest of the paper is the same so we'll still match later.
+ignoredCharsets=[";","(",")"]+list("0123456789")+\
+	[ " "+l+". " for l in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" ]+\
+		["creative", "license", "licence", "summary", "permission", "distribution", "reproduction", "party", "article", "availability", "USA", "United", "Canada", "Department", "University", "Press","accepted","proof","publication","reviewed","manuscript"]
 # how does string-based dupe-checking work? "chunk" one set of text into N-word-length chunks (sliding window), check if that series of words is in the other. (you could also do longest-common-substring, but we don't need to be that general. all we care about is chunks of words above the threshold in both papers)
 def checkForDuplicateTextSingle(threshold=consecutiveWordThreshold):
 	global index
@@ -200,13 +349,12 @@ def checkForDuplicateTextSingle(threshold=consecutiveWordThreshold):
 				sub=" ".join(words1[i:i+threshold])
 
 				#e.g. "if ';' in sub". certain characters may indicate, for example, shared citations! 
-				if True in [ c in sub for c in ignoredCharsets ]:
+				if True in [ c.lower() in sub.lower() for c in ignoredCharsets ]:
 					continue
 				if sub in text2:
 					print("likely match:",f1,f2)
 					print(sub)
-					index[f1]["matches"].append(f2)
-					index[f2]["matches"].append(f1)
+					addMatch(f1,f2)
 					break
 
 			# whether or not we found anything, denote that these two files have been compared
@@ -218,7 +366,7 @@ def checkForDuplicateTextParallel(threshold=consecutiveWordThreshold):
 	global index
 
 	from multiprocessing import Pool, Process, Manager, set_start_method #, Array, Value
-	set_start_method('fork')
+	set_start_method('fork',force=True)
 	manager = Manager()
 	dic = manager.dict()							# shared dict for multiprocessing pool to record results to. 
 
@@ -231,9 +379,9 @@ def checkForDuplicateTextParallel(threshold=consecutiveWordThreshold):
 				continue				# here before actually processing any of them)
 			args.append([dic,f1,f2,threshold])
 			# things get weird when you try putting lists etc in the dict. instead, we store "file1 file2" pairs as the key
-			dic[f1+" "+f2]=""
+			dic[(f1,f2)]="" # tuples can be keys! better than splitting by " ", in case there are spaces in paths/filenames
 
-	print("kick off pool")
+	print("kick off pool",len(args),"checks across",parallelWorkers,"workers")
 	try:
 		p=Pool(processes=parallelWorkers)
 		with p as pool:
@@ -247,11 +395,10 @@ def checkForDuplicateTextParallel(threshold=consecutiveWordThreshold):
 		if len(dic[k])==0:		# blank means this entry may not have been reached
 			continue
 		print("UPDATE",k)
-		f1,f2=k.split()
+		f1,f2=k
 		if dic[k]=="match":
 			#print("match")
-			index[f1]["matches"].append(f2)
-			index[f2]["matches"].append(f1)
+			addMatch(f1,f2)
 		#print("checked")
 		index[f1]["checkedTextAgainst"].append(f2)
 		index[f2]["checkedTextAgainst"].append(f1)
@@ -270,21 +417,19 @@ def dupeTextWorker(args):
 			len1,len2=len2,len1
 		# scan through chunks of words until we reach the end, or until we find something
 		for i in range(len1-threshold):
-			sub=" ".join(words1[i:i+threshold])
+			sub=" ".join(words1[i:i+threshold]) # sliding window "the quick [brown fox jumped over] the lazy dog"
 			if True in [ c in sub for c in ignoredCharsets ]:
 			#if ";" in sub: # certain characters may indicate, for example, shared citations! 
 				continue
-			if sub in text2:
+			if sub in text2:					# sliding window from above, compared to full second text
 				print("likely match:",f1,f2)
 				print(sub)
-				#dic[f1]["matches"].append(f2)
-				#dic[f2]["matches"].append(f1)
-				dic[f1+" "+f2]="match"
+				dic[(f1,f2)]="match"
 				break
 		# whether or not we found anything, denote that these two files have been compared. 
 		# in checkForDuplicateTextSingle(), we update the index global directly, but we can't do that here. memory is not shared. instead, we write to the shared dict
-		if len(dic[f1+" "+f2])==0:
-			dic[f1+" "+f2]="nope"
+		if len(dic[(f1,f2)])==0:
+			dic[(f1,f2)]="nope"
 		#time.sleep(1)
 		took=time.time()-start
 		if took>1:
@@ -292,8 +437,32 @@ def dupeTextWorker(args):
 	except KeyboardInterrupt:
 		pass
 
+def checkForDupesByImage():
+	import hashlib
+	hasher = hashlib.sha256()
+	global index ; hashes = {}
+	print("extracting and hashing images")
+	fnames = list(sorted(index.keys()))
+	for f in tqdm(fnames):
+		im=getMiddlePage(f)
+		h = hashlib.sha256(im.tobytes()).hexdigest()
+		hashes[f]=h
+	print("comparing hashes")
+	for i,f1 in enumerate(tqdm(fnames)):
+		for j,f2 in enumerate(fnames):
+			if i>=j:
+				continue
+			if not os.path.exists(f2):
+				continue
+			if hashes[f1]==hashes[f2]:
+				#shutil.move(f2,".dupes/"+f2.replace("/","_"))
+				#del index[f2]
+				print("likely match:",f1,f2)
+				addMatch(f1,f2)
+
+
 # extract an image of the middle page of both documents. if it is a pixel-by-pixel match, it's probably a copy. this is useful for pdfs without "text" stored in them (e.g. scans of books), which could probably benefit from OCR
-def checkForDupesByImage(nth=1,i1=0,i2=0):
+def checkForDupesByImage_old(nth=1,i1=0,i2=0):
 	global index
 	imageDict={}
 	files=list(sorted(index.keys()))
@@ -321,8 +490,7 @@ def checkForDupesByImage(nth=1,i1=0,i2=0):
 			sy=min(sy1,sy2) ; sx=min(sx1,sx2)
 			if np.amax(np.absolute(pix1[:sy,:sx,:]-pix2[:sy,:sx,:]))<2:
 				print("likely match:",f1,f2)
-				index[f1]["matches"].append(f2)
-				index[f2]["matches"].append(f1)
+				addMatch(f1,f2)
 
 			# whether or not we found anything, denote that these two files have been compared
 			index[f1]["checkedPixelsAgainst"].append(f2)
@@ -330,7 +498,7 @@ def checkForDupesByImage(nth=1,i1=0,i2=0):
 
 # bonkers RAM usage to store the middle page of each pdf in memory (prevents needing to reload each every time). instead, compare subsets of all files against subsets
 def checkForDupesByImageNested():
-	N=3
+	N=20								# if N is too high, you reread images a ton of times. if N is too small you blow RAM
 	for i in range(N):					# all evens vs all evens
 		for j in range(N):				# all odds vs all evens...
 			checkForDupesByImage(nth=N,i1=i,i2=j)
@@ -338,7 +506,12 @@ def checkForDupesByImageNested():
 # preview each file, and ask the user what they want to do (delete a duplicate, nmark them as not duplicates, etc)
 # TODO how should we handle forked matches? A matched B and C, B only matched A, C only matched A (because B and C are pages out of A, for example). 
 def manageDuplicates(ignoreAlreadySorted=True): 
-	files=list(index.keys())
+	files=[] ; num_matches = []
+	for f in index.keys():
+		files.append(f) ; num_matches.append(len(index[f]["matches"]))
+	num_matches,files = zip(*reversed(sorted(zip(num_matches,files))))
+
+
 	for f in files:
 		if ignoreAlreadySorted and "duplicates" in f: 			# Ignore files already in quarantine
 			continue
@@ -443,7 +616,27 @@ def unlinkEntries(filelist='',fromAll=True):
 			c=input("enter filename to unlink: ")
 			if c=="q" or len(c)==0:
 				break
-			filelist.append(c)
+			if c=="*": # UNLINK ALL! use with care!
+				filelist=list(index.keys())
+			else:
+				candidates = fuzzyMatch(c)
+				if len(candidates)==1:
+					filelist.append(candidates[0])
+				else:
+					print("did you mean",candidates)
+	#filtered = []
+	#for f in filelist:
+	#	candidates = fuzzyMatch(f)
+	#	if len(candidates)==1:
+	#		filtered.apend(f)
+	#	else:
+	#		print("did you mean",candidates)
+	#	#if ".pdf" not in f:
+	#	#	f=f+".pdf"
+	#	#if f not in index.keys():
+	#	#	print("warning:",f,"not in index, did you mean ")
+	#filelist = [ f if ".pdf" in f else f+".pdf" for f in filelist ]
+	#filelist = filtered
 	# for every time in the filelist, EITHER compare against EVERY other file, or other files in this same filelist
 	for c in filelist:
 		if fromAll:
@@ -452,12 +645,14 @@ def unlinkEntries(filelist='',fromAll=True):
 			others=filelist
 		for f in others:
 			# for an index entry (pdf file), a dict stores pointers to other files. these are the locations of those pointers. so when we change a file's name or location, we need to check all other files' pointers and update them with this file's new name or location. 
-			print("remove",c,"-->",f,"linkages")
-
+			removed = False
 			for pointerKey in ["matches","checkedTextAgainst","checkedPixelsAgainst"]: 
 				if c in index[f][pointerKey]:
 					i=index[f][pointerKey].index(c)
 					del index[f][pointerKey][i]
+					removed = True
+			if removed:
+				print("remove",c,"-->",f,"linkages")
 		for pointerKey in ["matches","checkedTextAgainst","checkedPixelsAgainst"]:
 			if c in index.keys():
 				index[c][pointerKey]=[]
@@ -532,17 +727,22 @@ def reletter():
 			if direc+author+year+letter+".pdf"==f:	# self. filename is already fine
 				print(f,"[okay]")
 				break
-			if direc+author+year+letter+".pdf" in index.keys():	# another file already has this letter
+			f2 = direc+author+year+letter+".pdf"
+			if f2 in index.keys() or os.path.exists(f2):	# another file already has this letter
 				continue
-			c=input("rename: "+f+" --> "+direc+author+year+letter+".pdf (y/i/n) : ")
+			c=input("rename: "+f+" --> "+f2+" (y/i/n) : ")
 			if len(c)>3:
 				while os.path.exists(c+".pdf"):
 					c=input("error, that file already exists, try again: ")
 				rekey(f,c+".pdf")
 				shutil.move(f,c+".pdf")
 			elif "y" in c:
-				rekey(f,direc+author+year+letter+".pdf")
-				shutil.move(f,direc+author+year+letter+".pdf") # BUG: if only renaming is capitalization, and filesystem is case-insensitive, you will rekey but not actually rename. it will be reindex, all linkages will be removed (appearing as danglers), and it will be rechecked as dupe against everything.
+				rekey(f,f2)
+				if f.lower() == f2:
+					os.rename(f,f.replace(".pdf","_.pdf"))
+					os.rename(f.replace(".pdf","_.pdf"),f2)
+				else:
+					os.rename(f,f2) # BUG: if only renaming is capitalization, and filesystem is case-insensitive, you will rekey but not actually rename. it will be reindex, all linkages will be removed (appearing as danglers), and it will be rechecked as dupe against everything.
 			elif "n" in c:
 				index[f]["dontrename"]=True
 			elif "q" in c:
@@ -615,34 +815,72 @@ def getAuthorName(f):
 			break
 	return f[:i].lower().strip()
 
-lastOpened=False
-# ask the user for a filename, with or without file suffix (.pdf), and return last-opened if none is entered
-def getFilename():
-	global lastOpened
-	f=input("enter filename: ")
-	if len(f)==0 and lastOpened:
-		return lastOpened
+def getYear(f):
+	year = ""
+	f=f.split("/")[-1]
+	for i in range(len(f)):
+		if f[i] in "0123456789":
+			year += f[i]
+	if len(year)==4:
+		return year
+	return None
+
+def fuzzyMatch(f):
 	if ".pdf" not in f:
 		f=f+".pdf"
-	if not os.path.exists(f):
-		print("error, file does not exist")
-		candidates=[]
-		authorName=getAuthorName(f)#.lower().strip()
-		#print("authorName",authorName)
-		for fc in sorted(index.keys()):
-			fca=getAuthorName(fc)#.lower().strip()
-			#print("compare against: ",authorName,fca,authorName==fca)
-			if authorName in fca or fca in authorName:
-				candidates.append(fc)
-		if len(candidates)==1:
-			print("assuming you meant: "+candidates[0])
-			return candidates[0]
-		if len(candidates)>0:
-			print("did you mean: "+",".join(candidates))
+	# exact match, return it
+	if f in index.keys():
+		return [f]
+	candidates=[]
+	# empty filename??
+	if len(f.strip())==0:
+		return []
+	# fuzzy-match by author name
+	authorName=getAuthorName(f)#.lower().strip()
+	for fc in sorted(index.keys()):
+		fca=getAuthorName(fc)#.lower().strip()
+		if authorName in fca or fca in authorName:
+			candidates.append(fc)
+	# if year is provide, filter down to year matches. cahill1990 candidates should limit to cahill1990a and cahill1990b, NOT cahill2004
+	year = getYear(f)
+	if year is not None:
+		year_matches = [ getYear(f2)==year for f2 in candidates ]
+		candidates = [ c for m,c in zip(year_matches,candidates) if m ]
+	return candidates
 
+last_opened=False
+# ask the user for a filename, with or without file suffix (.pdf), and return last-opened if none is entered
+def getFilename():
+	global last_opened
+	f=input("enter filename: ")
+	# no file given, default to last
+	if len(f)==0 and last_opened:
+		return last_opened
+	if ".pdf" not in f:
+		f=f+".pdf"
+	# exact match
+	if os.path.exists(f):
+		last_opened=f
+		return f
+	# fallback to fuzzy matching to find candidates
+	print("error, file does not exist")
+	candidates = fuzzyMatch(f)
+	# one candidate, this is it
+	if len(candidates)==1:
+		print("assuming you meant: "+candidates[0])
+		last_opened = candidates[0]
+		return candidates[0]
+	# multiple candidates, but one (and only one) is an exact author match
+	author_matches = [ 1 if getAuthorName(f2)==f.replace(".pdf","") else 0 for f2 in candidates ]
+	if sum(author_matches)==1:
+		i = author_matches.index(1)
+		print("assuming you meant: "+candidates[i])
+		last_opened = candidates[i]
+		return candidates[i]
+	# more than one, we give up
+	if len(candidates)>0:
+		print("did you mean: "+",".join(candidates))
 		return False
-	lastOpened=f
-	return f
 
 # ask for the filename, open it with the system's pdf viewer
 def openFile():
@@ -653,21 +891,37 @@ def openFile():
 	os.system(c)
 
 # ask for the filename, return getAuthorName(fc).lower()
-def getBibtex():
+def getBibtex(f="",ask=True):
 	import pdf2bib
 	pdf2bib.config.set('verbose',True)
-	f=getFilename()
+	if len(f)==0:
+		f=getFilename()
 	if not f:
 		return
-	if "bibtex" in index[f].keys():
+	if f in index.keys() and "bibtex" in index[f].keys():
 		bib=index[f]["bibtex"]
 	else:
-		bib=pdf2bib.pdf2bib(f)['bibtex']
-		lines=bib.split("\n")
-		f=f[0].upper()+f[1:].replace(".pdf","")
-		lines[0]=lines[0].split("{")[0]+"{"+f+","
-		bib="\n".join(lines)
+		bib=pdf2bib.pdf2bib(f).get('bibtex',None)
+		if bib is None and ask:
+			c=input("bibtex could not be generated. enter it manually? (y/n): ")
+			if "y" in c.lower():
+				enterBibtex()
+		elif bib is None:
+			return None
+		else:
+			lines=bib.split("\n")
+			f2=f[0].upper()+f[1:].replace(".pdf","")
+			lines[0]=lines[0].split("{")[0]+"{"+f2+","
+			bib="\n".join(lines)
 	print(bib)
+	# pdf2doi can apparently edit the file, so rehash. indexed(f) updates the index, so copy off, update, re-write
+	if f in index.keys():
+		ind = index[f]
+		indexed(f)
+		for k in ind.keys():
+			if k!="hash" and k!="timestamp":
+				index[f][k]=ind[k]
+	return bib
 
 def enterBibtex():
 	global index
@@ -698,6 +952,7 @@ def enterBibtex():
 	#if b=="q":
 	#	return
 	index[f]["bibtex"]="\n".join(bib)
+	saveJson()
 
 def translatePaper():
 	f=getFilename()
@@ -731,6 +986,39 @@ def translatePaper():
 	#with open(f.replace(".pdf","_translated.txt"),'w') as fo:
 	#	fo.write(str(result))
 
+def bib2xml(bibtex):
+	import xml.etree.ElementTree as ET
+	from xml.dom import minidom
+	import bibtexparser
+	bibtex = bibtexparser.loads(bibtex)
+
+	root = ET.Element("bibliography")
+
+	for entry in bibtex.entries:
+		# Create an element for each entry type (e.g., <article>, <book>)
+		entry_type = entry.get('ENTRYTYPE', 'entry')
+		entry_element = ET.SubElement(root, entry_type)
+
+		# Set the unique citation key as an attribute
+		if 'ID' in entry:
+			entry_element.set('id', entry['ID'])
+
+		# Populate fields (e.g., <author>, <title>, <year>)
+		for field_name, field_value in entry.items():
+			# Skip internal metadata keys used by bibtexparser
+			if field_name in ['ENTRYTYPE', 'ID']:
+				continue
+
+			field_element = ET.SubElement(entry_element, field_name)
+			field_element.text = field_value
+
+	xml_string = ET.tostring(root, encoding='utf-8')
+	parsed_string = minidom.parseString(xml_string)
+	pretty_xml = parsed_string.toprettyxml(indent="    ")
+
+	#with open(xml_file_path, 'w', encoding='utf-8') as xml_file:
+	#	xml_file.write(pretty_xml)
+	print(pretty_xml)
 
 # "smart" command-line menu function: pass it a list of doubles: text and function to be called, and we'll display the text, and execute the function if that index is chosen
 def menu(options,save=True):
@@ -739,21 +1027,28 @@ def menu(options,save=True):
 		c=input("\n".join(s))
 		if "q" in c:
 			if save:
-				saveJson()
+				if saveJson():
+					return
+				else:
+					continue
 			return
-		c=int(c)
-		func=[ o[1] for o in options ][c-1]
 		try:
+			c=int(c)
+			func=[ o[1] for o in options ][c-1]
 			func()
 		except KeyboardInterrupt:
-			pass
-		#saveJson()
+			continue
+		except Exception as e:
+			import traceback
+			print(traceback.print_exc())
 
 def adminMenu():
 	menu([["scan folder",indexing],
+	["gather from",gatherFrom],
+	["hash-based dupe-check",checkForBinaryIdentical],
 	["text-based dupe-check (single)",checkForDuplicateTextSingle],
 	["text-based dupe-check (parallel)",checkForDuplicateTextParallel],
-	["image-based dupe-check",checkForDupesByImageNested],
+	["image-based dupe-check",checkForDupesByImage],
 	["manage duplicates",manageDuplicates],
 	["guided reletter",reletter],
 	["find OCRable",findOCRable],
