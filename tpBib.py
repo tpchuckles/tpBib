@@ -268,7 +268,7 @@ def gatherFrom():
 	#	print("failed on: "+",".join(skipped))
 
 def cleanupIndex(pointerKey,files):
-	# ensure all index entries exist as files! 
+	# ensure all index entries exist as files!
 	for f in list(index.keys()):							# look through files in index
 		if f not in files:						# clear index entries for files which are no longer present
 			del index[f]
@@ -285,7 +285,7 @@ def cleanupIndex(pointerKey,files):
 				i=index[f][pointerKey].index(f2)
 				del index[f][pointerKey][i]
 		if len(set(index[f][pointerKey])) != len(index[f][pointerKey]):
-			print("removing duplicate "+pointerKey+" entries:",index[f][pointerKey])
+			print("removing duplicate "+pointerKey+" entries:",index[f][pointerKey] if len(index[f][pointerKey])<10 else str(index[f][pointerKey][:10])+"...")
 			index[f][pointerKey]=list(set(index[f][pointerKey]))
 
 def hashed(f):
@@ -321,10 +321,10 @@ def checkForBinaryIdentical():
 				print("likely match:",f1,f2)
 				addMatch(f1,f2)
 
-# for string-based dupe-checking, prevent certain frequently-occurring long strings from matching: exclude common license blurbs, data availability statements, long affiliation addresses, repeated references, pre-print or author proof watermarks. These are allowed to be pretty agressive: if we have two matching papers but a portion of a matching paragraph is excluded, hopefully the rest of the paper is the same so we'll still match later.
+# for string-based dupe-checking, prevent certain frequently-occurring long strings from matching: exclude common license blurbs, data availability statements, long affiliation addresses, repeated references, pre-print or author proof watermarks, and endorsement disclaimers. These are allowed to be pretty agressive: if we have two matching papers but a portion of a matching paragraph is excluded, if the rest of the paper is the same then we'll still match later.
 ignoredCharsets=[";","(",")"]+list("0123456789")+\
 	[ " "+l+". " for l in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" ]+\
-		["creative", "license", "licence", "summary", "permission", "distribution", "reproduction", "party", "article", "availability", "USA", "United", "Canada", "Department", "University", "Press","accepted","proof","publication","reviewed","manuscript"]
+		["creative", "license", "licence", "summary", "permission", "distribution", "reproduction", "party", "article", "availability", "USA", "United", "Canada", "Department", "University", "Press","accepted","proof","publication","reviewed","manuscript","opinions","endorse"]
 # how does string-based dupe-checking work? "chunk" one set of text into N-word-length chunks (sliding window), check if that series of words is in the other. (you could also do longest-common-substring, but we don't need to be that general. all we care about is chunks of words above the threshold in both papers)
 def checkForDuplicateTextSingle(threshold=consecutiveWordThreshold):
 	global index
@@ -437,11 +437,12 @@ def dupeTextWorker(args):
 	except KeyboardInterrupt:
 		pass
 
+# We used to do a pixel-by-pixel comparison with a uint8 (255) max-deviation threshold of 1. we now technically allow *no* deviation since we're using a hash. is this a problem? why did we have the threshold of 1 before?? for now though, oh well, hash-based is insanely more efficient (speed, and memory: seconds vs hours and image-based was borking my 16 GB ram).
 def checkForDupesByImage():
 	import hashlib
 	hasher = hashlib.sha256()
 	global index ; hashes = {}
-	print("extracting and hashing images")
+	print("extracting and hashing images") # TODO hashing all images takes forever. we might not need to? we should populate and use checkedPixelsAgainst to assemble a list of comparisons, and then only hash those?
 	fnames = list(sorted(index.keys()))
 	for f in tqdm(fnames):
 		im=getMiddlePage(f)
@@ -1043,12 +1044,12 @@ def menu(options,save=True):
 			print(traceback.print_exc())
 
 def adminMenu():
-	menu([["scan folder",indexing],
-	["gather from",gatherFrom],
-	["hash-based dupe-check",checkForBinaryIdentical],
-	["text-based dupe-check (single)",checkForDuplicateTextSingle],
-	["text-based dupe-check (parallel)",checkForDuplicateTextParallel],
-	["image-based dupe-check",checkForDupesByImage],
+	menu([["reindex files",indexing],
+	["load files from elsewhere",gatherFrom],
+	["dupe-check (file hashes)",checkForBinaryIdentical],
+	["dupe-check (image-based)",checkForDupesByImage],
+	["dupe-check (text-based, single-threaded)",checkForDuplicateTextSingle],
+	["dupe-check (text-based, parallel)",checkForDuplicateTextParallel],
 	["manage duplicates",manageDuplicates],
 	["guided reletter",reletter],
 	["find OCRable",findOCRable],
